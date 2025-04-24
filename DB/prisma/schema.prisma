@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id               String            @id @default(uuid())
+  name             String
+  description      String?
+  domain           String?
+  emailDomains     String[]
+  staffCount       Int?
+  numJobs          Int               @default(0)
+  slug             String            @unique
+  isFeatured       Boolean           @default(false)
+  isRemoteFriendly Boolean           @default(false)
+  logos            Json?
+  website          Json?
+  parentSlugs      String[]
+  parents          String[]
+  batchInfo        String?
+  dataSource       String?
+  foundedAt        DateTime?
+  oneLiner         String?
+  status           String?
+  CompanyFounder   CompanyFounder[]
+  investors        CompanyInvestor[]
+  markets          CompanyMarket[]
+  offices          CompanyOffice[]
+  stages           CompanyStage[]
+  jobs             Job[]
+
+  @@index([numJobs])
+  @@index([name])
+  @@index([slug])
+  @@index([staffCount])
+  @@index([isRemoteFriendly])
+  @@index([isFeatured])
+}
+
+model Market {
+  id        String          @id @default(uuid())
+  name      String          @unique
+  companies CompanyMarket[]
+}
+
+model CompanyMarket {
+  companyId String
+  marketId  String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  market    Market  @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, marketId])
+  @@index([marketId])
+}
+
+model Stage {
+  id        String         @id @default(uuid())
+  name      String         @unique
+  companies CompanyStage[]
+}
+
+model CompanyStage {
+  companyId String
+  stageId   String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  stage     Stage   @relation(fields: [stageId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, stageId])
+  @@index([stageId])
+}
+
+model Office {
+  id        String          @id @default(uuid())
+  location  String          @unique
+  companies CompanyOffice[]
+  jobs      JobOffice[]
+}
+
+model CompanyOffice {
+  companyId String
+  officeId  String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  office    Office  @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, officeId])
+  @@index([officeId])
+}
+
+model Investor {
+  id        String            @id @default(uuid())
+  name      String            @unique
+  slug      String            @unique
+  companies CompanyInvestor[]
+}
+
+model CompanyInvestor {
+  companyId  String
+  investorId String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  investor   Investor @relation(fields: [investorId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, investorId])
+  @@index([investorId])
+}
+
+model Job {
+  id               String       @id @default(uuid())
+  title            String
+  applyUrl         String?
+  url              String?
+  companyId        String
+  remote           Boolean      @default(false)
+  hybrid           Boolean      @default(false)
+  timeStamp        DateTime?
+  manager          Boolean      @default(false)
+  consultant       Boolean      @default(false)
+  contractor       Boolean      @default(false)
+  minYearsExp      Int?
+  maxYearsExp      Int?
+  skills           Json?
+  requiredSkills   Json?
+  preferredSkills  Json?
+  departments      String[]
+  jobTypes         Json?
+  jobFunctions     Json?
+  jobSeniorities   Json?
+  regions          Json?
+  dataCompleteness String       @default("COMPLETE")
+  dataSource       String?
+  description      String?
+  equityRange      String?
+  roleSpecificType String?
+  company          Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  locations        JobOffice[]
+  salary           SalaryRange?
+
+  @@index([companyId])
+  @@index([title])
+  @@index([remote])
+  @@index([manager])
+  @@index([timeStamp])
+  @@index([dataSource])
+  @@index([dataCompleteness])
+}
+
+model JobOffice {
+  jobId    String
+  officeId String
+  job      Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  office   Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, officeId])
+  @@index([officeId])
+}
+
+model SalaryRange {
+  id       String  @id @default(uuid())
+  jobId    String  @unique
+  minValue Float?
+  maxValue Float?
+  currency String?
+  period   String?
+  job      Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+}
+
+model Skill {
+  id   String @id @default(uuid())
+  name String @unique
+}
+
+model FangJobs {
+  id       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title    String
+  desc     String?
+  date     DateTime? @db.Timestamp(6)
+  location String?
+  url      String?
+  company  String?
+}
+
+model CompanyFounder {
+  companyId String
+  founderId String
+  Company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  Founder   Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, founderId])
+  @@index([founderId])
+}
+
+model Founder {
+  id             String           @id
+  name           String
+  title          String?
+  bio            String?
+  twitter        String?
+  linkedin       String?
+  website        String?
+  CompanyFounder CompanyFounder[]
+}
+
+enum JobLevel {
+  ENTRY
+  JUNIOR
+  MID
+  SENIOR
+  LEAD
+  EXECUTIVE
+}
+
+enum WorkType {
+  ONSITE
+  HYBRID
+  REMOTE
+}

@@ -1,0 +1,9 @@
+selenium>=4.15.0
+flask
+requests
+sqlalchemy
+bs4
+tqdm
+packaging
+setuptools
+blinker>=1.4,<2.0

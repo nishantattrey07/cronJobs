@@ -1,0 +1,12 @@
+/.DS_Store
+node_modules
+.env
+.env.*
+.DS_Store
+output
+scraping_log.txt
+__pycache__
+import_log.txt
+skipped_records.json
+database.db
+skipped_records.json

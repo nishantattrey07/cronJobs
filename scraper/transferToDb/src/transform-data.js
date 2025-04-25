@@ -1,34 +1,65 @@
-const { logInfo, logVerbose, logSuccess, logError, TRANSACTION_TIMEOUT } = require('./utils');
+const { logInfo, logVerbose, logSuccess, logError, TRANSACTION_TIMEOUT, BATCH_SIZE } = require('./utils');
 const { Prisma } = require('@prisma/client');
 
 /**
  * Transform staging table data to final Prisma schema tables
+ * - Modified to use separate transactions for each major step
+ * - Enhanced with memory optimization
  */
 async function transformStagingToFinal(prisma, options = {}) {
   const { mode = 'insert' } = options;
   logInfo(`Transforming staging data into final schema tables (mode: ${mode})...`);
 
   try {
-    // Use a longer timeout for the transformation process
+    // Force garbage collection before starting if available
+    if (global.gc) {
+      logInfo("Running garbage collection before starting...");
+      global.gc();
+    }
+
+    // Step 1: Process Companies in its own transaction
+    logInfo("Step 1/5: Processing companies from staging...");
     await prisma.$transaction(async (tx) => {
-      // Need to process in the correct order to respect foreign key constraints
-
-      // Step 1: Process Companies
       await processCompaniesFromStaging(tx, mode);
+    }, { timeout: TRANSACTION_TIMEOUT });
 
-      // Step 2: Process related entities (markets, stages, offices, investors)
+    // Free memory after step completion
+    if (global.gc) global.gc();
+    logInfo("Companies processing completed. Memory cleaned up.");
+
+    // Step 2: Process related entities in its own transaction
+    logInfo("Step 2/5: Processing related entities (markets, stages, offices, investors)...");
+    await prisma.$transaction(async (tx) => {
       await processRelatedEntitiesFromStaging(tx);
+    }, { timeout: TRANSACTION_TIMEOUT });
 
-      // Step 3: Process Jobs
+    // Free memory after step completion
+    if (global.gc) global.gc();
+    logInfo("Related entities processing completed. Memory cleaned up.");
+
+    // Step 3: Process Jobs in its own transaction
+    logInfo("Step 3/5: Processing jobs from staging...");
+    await prisma.$transaction(async (tx) => {
       await processJobsFromStaging(tx, mode);
+    }, { timeout: TRANSACTION_TIMEOUT });
 
-      // Step 4: Process job relationships (locations, salary ranges)
-      await processJobRelationshipsFromStaging(tx);
+    // Free memory after step completion
+    if (global.gc) global.gc();
+    logInfo("Jobs processing completed. Memory cleaned up.");
 
-      // Step 5: Update counters
+    // Step 4: Process job relationships - this is the most memory-intensive step
+    logInfo("Step 4/5: Processing job relationships (locations, salaries)...");
+    await processJobRelationshipsOptimized(prisma);
+
+    // Free memory after step completion
+    if (global.gc) global.gc();
+    logInfo("Job relationships processing completed. Memory cleaned up.");
+
+    // Step 5: Update counters in its own transaction
+    logInfo("Step 5/5: Updating counters and statistics...");
+    await prisma.$transaction(async (tx) => {
       await updateCounters(tx);
-
-    }, { timeout: TRANSACTION_TIMEOUT * 2 }); // Extra time for transformation
+    }, { timeout: TRANSACTION_TIMEOUT });
 
     logSuccess('Successfully transformed staging data into the final schema');
   } catch (error) {
@@ -366,77 +397,127 @@ async function processJobsFromStaging(prisma, mode) {
 }
 
 /**
- * Process job relationships from staging (job locations, salary ranges)
+ * Process job relationships from staging with maximum optimization
+ * - Breaks operation into smaller batches
+ * - Uses separate transactions
+ * - Reduces batch size for large datasets
  */
-async function processJobRelationshipsFromStaging(prisma) {
-  logVerbose('Processing job relationships from staging...');
+async function processJobRelationshipsOptimized(prisma) {
+  logVerbose('Processing job relationships from staging with optimized approach...');
 
-  // First identify processed jobs by their company slug and title
-  await prisma.$executeRaw`
-    CREATE TEMP TABLE IF NOT EXISTS job_mapping AS
-    SELECT j.id as job_id, js.company_slug, js.title, jls.job_id as staging_job_id
-    FROM job_staging js
-    JOIN "Company" c ON js.company_slug = c.slug
-    JOIN "Job" j ON js.title = j.title AND j."companyId" = c.id
-    LEFT JOIN job_location_staging jls ON js.company_slug = jls.company_slug AND js.title = (
-      SELECT js2.title FROM job_staging js2 
-      JOIN job_location_staging jls2 ON jls2.job_id = jls.job_id
-      WHERE js2.company_slug = jls.company_slug
-      LIMIT 1
-    )
+  // STEP 1: Create the job mapping table in its own transaction
+  await prisma.$transaction(async (tx) => {
+    logVerbose('Creating job mapping table...');
+    await tx.$executeRaw`
+      CREATE TEMP TABLE IF NOT EXISTS job_mapping AS
+      SELECT j.id as job_id, js.company_slug, js.title, jls.job_id as staging_job_id
+      FROM job_staging js
+      JOIN "Company" c ON js.company_slug = c.slug
+      JOIN "Job" j ON js.title = j.title AND j."companyId" = c.id
+      LEFT JOIN job_location_staging jls ON js.company_slug = jls.company_slug AND js.title = (
+        SELECT js2.title FROM job_staging js2 
+        JOIN job_location_staging jls2 ON jls2.job_id = jls.job_id
+        WHERE js2.company_slug = jls.company_slug
+        LIMIT 1
+      )
+    `;
+  }, { timeout: TRANSACTION_TIMEOUT });
+
+  // Free memory
+  if (global.gc) global.gc();
+
+  // STEP 2: Clear existing job relationships
+  await prisma.$transaction(async (tx) => {
+    logVerbose('Clearing existing job relationships...');
+    await tx.$executeRaw`
+      DELETE FROM "JobOffice"
+      WHERE "jobId" IN (SELECT job_id FROM job_mapping)
+    `;
+  }, { timeout: TRANSACTION_TIMEOUT });
+
+  // Free memory
+  if (global.gc) global.gc();
+
+  // STEP 3: Get count of job locations to batch process
+  const locationsCountResult = await prisma.$queryRaw`
+    SELECT COUNT(*) as count FROM job_location_staging
   `;
+  const locationsCount = parseInt(locationsCountResult[0].count);
+  logVerbose(`Found ${locationsCount} job locations to process`);
 
-  // For upsert mode, clear existing relationships first
-  await prisma.$executeRaw`
-    DELETE FROM "JobOffice"
-    WHERE "jobId" IN (SELECT job_id FROM job_mapping)
-  `;
+  // STEP 4: Process job locations in smaller batches
+  // Use a smaller batch size for large datasets
+  const LOCATIONS_BATCH_SIZE = locationsCount > 10000 ? 500 : (locationsCount > 5000 ? 750 : 1000);
+  const batches = Math.ceil(locationsCount / LOCATIONS_BATCH_SIZE);
 
-  // Process job locations
-  await prisma.$executeRaw`
-    INSERT INTO "JobOffice" ("jobId", "officeId")
-    SELECT 
-      jm.job_id,
-      o.id
-    FROM job_location_staging jls
-    JOIN job_mapping jm ON jls.job_id = jm.staging_job_id
-    JOIN "Office" o ON jls.location_name = o.location
-    ON CONFLICT ("jobId", "officeId") DO NOTHING
-  `;
+  logVerbose(`Processing job locations in ${batches} batches of ${LOCATIONS_BATCH_SIZE}...`);
 
-  // Process salary ranges - use a subquery with DISTINCT ON to handle duplicates
-  await prisma.$executeRaw`
-    INSERT INTO "SalaryRange" (id, "jobId", "minValue", "maxValue", currency, period)
-    SELECT 
-      gen_random_uuid(),
-      unique_salaries.job_id,
-      unique_salaries.min_value,
-      unique_salaries.max_value,
-      unique_salaries.currency,
-      unique_salaries.period
-    FROM (
-      SELECT DISTINCT ON (jm.job_id)
-        jm.job_id,
-        ss.min_value,
-        ss.max_value,
-        ss.currency,
-        ss.period
-      FROM salary_staging ss
-      JOIN job_mapping jm ON ss.job_id = jm.staging_job_id
-      -- Take the first one for each job_id (you could add ORDER BY to control which one)
-      ORDER BY jm.job_id, ss.min_value DESC
-    ) AS unique_salaries
-    ON CONFLICT ("jobId") DO UPDATE SET
-      "minValue" = EXCLUDED."minValue",
-      "maxValue" = EXCLUDED."maxValue",
-      currency = EXCLUDED.currency,
-      period = EXCLUDED.period
-  `;
+  for (let offset = 0; offset < locationsCount; offset += LOCATIONS_BATCH_SIZE) {
+    const batchNumber = Math.floor(offset / LOCATIONS_BATCH_SIZE) + 1;
+    logVerbose(`Processing batch ${batchNumber}/${batches} (offset ${offset})...`);
 
-  // Clean up
-  await prisma.$executeRaw`DROP TABLE IF EXISTS job_mapping`;
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        INSERT INTO "JobOffice" ("jobId", "officeId")
+        SELECT 
+          jm.job_id,
+          o.id
+        FROM job_location_staging jls
+        JOIN job_mapping jm ON jls.job_id = jm.staging_job_id
+        JOIN "Office" o ON jls.location_name = o.location
+        ORDER BY jls.job_id
+        LIMIT ${LOCATIONS_BATCH_SIZE} OFFSET ${offset}
+        ON CONFLICT ("jobId", "officeId") DO NOTHING
+      `;
+    }, { timeout: TRANSACTION_TIMEOUT });
 
-  logVerbose('Processed all job relationships');
+    logVerbose(`Completed batch ${batchNumber}/${batches}`);
+
+    // Free memory between batches
+    if (global.gc) global.gc();
+
+    // Add a small delay between batches to reduce resource contention
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  // STEP 5: Process salary ranges
+  await prisma.$transaction(async (tx) => {
+    logVerbose('Processing salary ranges...');
+    await tx.$executeRaw`
+      INSERT INTO "SalaryRange" (id, "jobId", "minValue", "maxValue", currency, period)
+      SELECT 
+        gen_random_uuid(),
+        unique_salaries.job_id,
+        unique_salaries.min_value,
+        unique_salaries.max_value,
+        unique_salaries.currency,
+        unique_salaries.period
+      FROM (
+        SELECT DISTINCT ON (jm.job_id)
+          jm.job_id,
+          ss.min_value,
+          ss.max_value,
+          ss.currency,
+          ss.period
+        FROM salary_staging ss
+        JOIN job_mapping jm ON ss.job_id = jm.staging_job_id
+        ORDER BY jm.job_id, ss.min_value DESC
+      ) AS unique_salaries
+      ON CONFLICT ("jobId") DO UPDATE SET
+        "minValue" = EXCLUDED."minValue",
+        "maxValue" = EXCLUDED."maxValue",
+        currency = EXCLUDED.currency,
+        period = EXCLUDED.period
+    `;
+  }, { timeout: TRANSACTION_TIMEOUT });
+
+  // STEP 6: Clean up
+  await prisma.$transaction(async (tx) => {
+    logVerbose('Cleaning up temporary tables...');
+    await tx.$executeRaw`DROP TABLE IF EXISTS job_mapping`;
+  }, { timeout: TRANSACTION_TIMEOUT });
+
+  logVerbose('Successfully processed all job relationships with optimized approach');
 }
 
 /**

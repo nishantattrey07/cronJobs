@@ -110,10 +110,10 @@ function createProgressBar(total) {
 }
 
 /**
- * Configuration constants
+ * Configuration constants - INCREASED TRANSACTION TIMEOUT
  */
 const BATCH_SIZE = 200;
-const TRANSACTION_TIMEOUT = 300000;
+const TRANSACTION_TIMEOUT = 600000; // Increased from 300000 to 600000 (10 minutes)
 const DROP_STAGING_TABLES = true;
 
 module.exports = {
@@ -130,4 +130,4 @@ module.exports = {
     BATCH_SIZE,
     TRANSACTION_TIMEOUT,
     DROP_STAGING_TABLES
-}; 
+};

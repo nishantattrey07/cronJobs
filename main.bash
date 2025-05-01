@@ -1,6 +1,6 @@
 #!/bin/bash
 # Configuration
-REPO_DIR="/home/azureuser/cronJobs"
+REPO_DIR="/home/azureuser/cron-jobs"
 LOG_DIR="$REPO_DIR/logs"
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 LOG_FILE="$LOG_DIR/job_scraper_$TIMESTAMP.log"
@@ -9,7 +9,9 @@ MEMORY_LOG="$LOG_DIR/memory_usage_$TIMESTAMP.log"
 START_TIME=$(date +%s)  # Record start time in seconds since epoch
 
 # Slack webhook configuration
-
+SLACK_WEBHOOK_URL="https://hooks.slack.com/services/token"  # Replace with your actual Slack webhook URL
+SLACK_CHANNEL="#cron-jobs"  # Replace with your desired channel
+SLACK_USERNAME="Job Scraper Bot"
 
 # Create log directory if it doesn't exist
 mkdir -p "$LOG_DIR"

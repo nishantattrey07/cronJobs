@@ -146,6 +146,12 @@ model Job {
   @@index([timeStamp])
   @@index([dataSource])
   @@index([dataCompleteness])
+    // For non-null URLs
+  @@unique([url, companyId], map: "unique_job_url_company", name: "Job_url_company_key")
+  
+  // For all jobs
+  // @@unique([title, companyId], map: "unique_job_title_company", name: "Job_title_company_key")
+
 }
 
 model JobOffice {

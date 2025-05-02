@@ -934,13 +934,13 @@ async function processCompanies(companies) {
 }
 
 /**
- * Process jobs data
+ * Process jobs data with better error handling and duplicate detection
  */
 async function processJobs(jobs, companySlugToIdMap) {
     console.log(`\n💼 Processing ${jobs.length} jobs...`);
 
     const progressBar = createProgressBar(jobs.length, "Jobs");
-    const chunks = chunkArray(jobs, BATCH_SIZE);
+    const chunks = chunkArray(jobs, 1); // Process one job at a time to avoid transaction abort issues
 
     // Track unique offices for job locations
     const officesMap = new Map();
@@ -948,75 +948,127 @@ async function processJobs(jobs, companySlugToIdMap) {
     const jobOfficeRelations = [];
 
     let jobsProcessed = 0;
+    let jobsSkipped = 0;
+    let jobsErrored = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-        const batch = chunks[i];
+    // Process jobs one by one to prevent aborted transactions
+    for (const job of jobs) {
+        // Skip jobs without a title or company slug
+        if (!job.title || !job.companySlug) {
+            console.error(`⚠️ Skipping job with missing title or company slug: ${JSON.stringify(job).substring(0, 100)}...`);
+            progressBar.update();
+            jobsSkipped++;
+            continue;
+        }
 
-        await prisma.$transaction(async (tx) => {
-            for (const job of batch) {
-                // Skip jobs without a title or company slug
-                if (!job.title || !job.companySlug) {
-                    console.error(`⚠️ Skipping job with missing title or company slug: ${JSON.stringify(job).substring(0, 100)}...`);
-                    progressBar.update();
-                    continue;
-                }
+        // Skip if company doesn't exist
+        const companyId = companySlugToIdMap.get(job.companySlug);
+        if (!companyId) {
+            console.error(`⚠️ Skipping job with unknown company slug: ${job.companySlug}`);
+            progressBar.update();
+            jobsSkipped++;
+            continue;
+        }
 
-                // Skip if company doesn't exist
-                const companyId = companySlugToIdMap.get(job.companySlug);
-                if (!companyId) {
-                    console.error(`⚠️ Skipping job with unknown company slug: ${job.companySlug}`);
-                    progressBar.update();
-                    continue;
-                }
+        try {
+            // Prepare job data
+            const jobData = {
+                title: job.title,
+                applyUrl: job.applyUrl,
+                url: job.url,
+                companyId: companyId,
+                remote: !!job.remote,
+                hybrid: !!job.hybrid,
+                timeStamp: job.timeStamp ? new Date(job.timeStamp) : null,
+                manager: !!job.manager,
+                consultant: !!job.consultant,
+                contractor: !!job.contractor,
+                minYearsExp: job.minYearsExp,
+                maxYearsExp: job.maxYearsExp,
+                skills: job.skills,
+                requiredSkills: job.requiredSkills,
+                preferredSkills: job.preferredSkills,
+                departments: Array.isArray(job.departments) ? job.departments : [],
+                jobTypes: job.jobTypes,
+                jobFunctions: job.jobFunctions,
+                jobSeniorities: job.jobSeniorities,
+                regions: job.regions,
+                dataSource: DATA_SOURCE,
+                dataCompleteness: job.dataCompleteness || 'COMPLETE',
+                equityRange: job.equityRange,
+                roleSpecificType: job.roleSpecificType
+            };
 
-                try {
-                    // Create the job
-                    const createdJob = await tx.job.create({
-                        data: {
-                            title: job.title,
-                            applyUrl: job.applyUrl,
-                            url: job.url,
-                            companyId: companyId,
-                            remote: !!job.remote,
-                            hybrid: !!job.hybrid,
-                            timeStamp: job.timeStamp ? new Date(job.timeStamp) : null,
-                            manager: !!job.manager,
-                            consultant: !!job.consultant,
-                            contractor: !!job.contractor,
-                            minYearsExp: job.minYearsExp,
-                            maxYearsExp: job.maxYearsExp,
-                            skills: job.skills,
-                            requiredSkills: job.requiredSkills,
-                            preferredSkills: job.preferredSkills,
-                            departments: Array.isArray(job.departments) ? job.departments : [],
-                            jobTypes: job.jobTypes,
-                            jobFunctions: job.jobFunctions,
-                            jobSeniorities: job.jobSeniorities,
-                            regions: job.regions,
-                            dataSource: DATA_SOURCE,
-                            dataCompleteness: job.dataCompleteness || 'COMPLETE',
-                            equityRange: job.equityRange,
-                            roleSpecificType: job.roleSpecificType
-                        }
-                    });
+            // Check if this job exists by URL+title or title+companyId
+            let existingJob = null;
 
-                    // Track job's office locations
-                    if (job.offices && Array.isArray(job.offices)) {
-                        for (const office of job.offices) {
-                            if (office && office.location) {
-                                officesMap.set(office.location, office);
-
-                                // Store relationship for later creation
-                                jobOfficeRelations.push({
-                                    jobId: createdJob.id,
-                                    officeLocation: office.location
-                                });
-                            }
-                        }
+            if (job.url) {
+                // Try finding by URL first if available
+                existingJob = await prisma.job.findFirst({
+                    where: {
+                        url: job.url,
+                        companyId: companyId
                     }
+                });
+            }
 
-                    // Create salary range if it exists
-                    if (job.salaryRange) {
+            if (!existingJob) {
+                // If not found by URL, try title + companyId
+                existingJob = await prisma.job.findFirst({
+                    where: {
+                        title: job.title,
+                        companyId: companyId
+                    }
+                });
+            }
+
+            let createdJob;
+            // Use individual transactions for each job
+            await prisma.$transaction(async (tx) => {
+                if (existingJob) {
+                    // Update existing job
+                    createdJob = await tx.job.update({
+                        where: { id: existingJob.id },
+                        data: jobData
+                    });
+                } else {
+                    // Create new job
+                    createdJob = await tx.job.create({
+                        data: jobData
+                    });
+                }
+
+                // Create salary range if it exists
+                if (job.salaryRange) {
+                    if (existingJob) {
+                        // Update existing salary range or create if not exists
+                        const existingSalary = await tx.salaryRange.findUnique({
+                            where: { jobId: existingJob.id }
+                        });
+
+                        if (existingSalary) {
+                            await tx.salaryRange.update({
+                                where: { id: existingSalary.id },
+                                data: {
+                                    minValue: job.salaryRange.minValue,
+                                    maxValue: job.salaryRange.maxValue,
+                                    currency: job.salaryRange.currency,
+                                    period: job.salaryRange.period
+                                }
+                            });
+                        } else {
+                            await tx.salaryRange.create({
+                                data: {
+                                    jobId: createdJob.id,
+                                    minValue: job.salaryRange.minValue,
+                                    maxValue: job.salaryRange.maxValue,
+                                    currency: job.salaryRange.currency,
+                                    period: job.salaryRange.period
+                                }
+                            });
+                        }
+                    } else {
+                        // Create new salary range for new job
                         await tx.salaryRange.create({
                             data: {
                                 jobId: createdJob.id,
@@ -1027,18 +1079,35 @@ async function processJobs(jobs, companySlugToIdMap) {
                             }
                         });
                     }
-
-                    jobsProcessed++;
-                } catch (error) {
-                    console.error(`❌ Error processing job ${job.title} for company ${job.companySlug}:`, error);
                 }
+            });
 
-                progressBar.update();
+            // Track job's office locations
+            if (job.offices && Array.isArray(job.offices)) {
+                for (const office of job.offices) {
+                    if (office && office.location) {
+                        officesMap.set(office.location, office);
+
+                        // Store relationship for later creation
+                        jobOfficeRelations.push({
+                            jobId: createdJob.id,
+                            officeLocation: office.location
+                        });
+                    }
+                }
             }
-        }, { timeout: TRANSACTION_TIMEOUT });
+
+            jobsProcessed++;
+        } catch (error) {
+            console.error(`❌ Error processing job ${job.title} for company ${job.companySlug}:`, error);
+            jobsErrored++;
+        }
+
+        progressBar.update();
     }
 
     progressBar.complete();
+    console.log(`Jobs stats: Processed: ${jobsProcessed}, Skipped: ${jobsSkipped}, Errors: ${jobsErrored}`);
 
     // Ensure all job offices exist
     console.log(`\n🏢 Creating ${officesMap.size} job offices...`);
@@ -1134,7 +1203,7 @@ async function importYcData(options = {}) {
     const {
         companiesFile,
         jobsFile,
-        mode = 'insert'
+        mode = 'upsert' // Changed default from 'insert' to 'upsert'
     } = options;
 
     if (!companiesFile && !jobsFile) {
@@ -1223,7 +1292,7 @@ async function runImport() {
         const stats = await importYcData({
             companiesFile,
             jobsFile,
-            mode: 'insert' // Change to 'upsert' to update existing records
+            mode: 'upsert' // Changed from 'insert' to 'upsert'
         });
 
     } catch (error) {

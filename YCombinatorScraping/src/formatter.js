@@ -1,11 +1,26 @@
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto'); 
 
 // Path to your JSON data file
 const INPUT_FILE_PATH = './output/yc_companies_combined.json';
 const OUTPUT_FILE_PATH = './output/yc_companies_formatted.json';
 const JOBS_OUTPUT_FILE_PATH = './output/yc_jobs_formatted.json';
+
+// Generate deterministic ID for founders based on their attributes
+function generateFounderId(founderData) {
+    // Create a unique identifier based on available attributes
+    const identityString = [
+        founderData.name || '',
+        founderData.social_links?.linkedin || '',
+        founderData.social_links?.twitter || '',
+        (founderData.bio || '').substring(0, 50) // Use just the beginning of bio to avoid large strings
+    ].join('::').toLowerCase();
+
+    // Create a hash of this string
+    return crypto.createHash('sha256').update(identityString).digest('hex');
+}
 
 // Helper for domain extraction
 function extractDomain(url) {
@@ -150,8 +165,11 @@ function formatCompanyData(companyData) {
     const founders = [];
     if (companyData.founders && Array.isArray(companyData.founders)) {
         for (const founderData of companyData.founders) {
+            // Generate a deterministic ID instead of random UUID
+            const founderId = generateFounderId(founderData);
+
             founders.push({
-                id: uuidv4(),
+                id: founderId,
                 name: founderData.name,
                 title: founderData.title || null,
                 bio: founderData.bio || null,
@@ -319,14 +337,14 @@ function formatCompanyData(companyData) {
 // Extract all jobs from formatted companies
 function extractJobsFromCompanies(companies) {
     const allJobs = [];
-    
+
     for (const company of companies) {
         if (company.jobs && company.jobs.length > 0) {
             // Add all jobs to the allJobs array
             allJobs.push(...company.jobs);
         }
     }
-    
+
     return allJobs;
 }
 
@@ -335,7 +353,7 @@ function removeJobsFromCompanies(companies) {
     return companies.map(company => {
         // Create a new object without the jobs array
         const { jobs, ...companyWithoutJobs } = company;
-        
+
         // Keep job count for reference
         return {
             ...companyWithoutJobs,
@@ -377,14 +395,14 @@ async function formatData() {
     // Extract all jobs before removing them from companies
     const allJobs = extractJobsFromCompanies(formattedCompanies);
     console.log(`Extracted ${allJobs.length} jobs total from all companies`);
-    
+
     // Remove jobs from companies to avoid duplication
     const companiesWithoutJobs = removeJobsFromCompanies(formattedCompanies);
-    
+
     // Write the formatted companies (without jobs) to file
     console.log(`Writing formatted companies data to ${OUTPUT_FILE_PATH}...`);
     fs.writeFileSync(OUTPUT_FILE_PATH, JSON.stringify(companiesWithoutJobs, null, 2));
-    
+
     // Write all jobs to a separate file
     console.log(`Writing formatted jobs data to ${JOBS_OUTPUT_FILE_PATH}...`);
     fs.writeFileSync(JOBS_OUTPUT_FILE_PATH, JSON.stringify(allJobs, null, 2));

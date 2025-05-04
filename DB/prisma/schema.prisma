@@ -208,6 +208,7 @@ model Founder {
   linkedin       String?
   website        String?
   CompanyFounder CompanyFounder[]
+  @@unique([name, linkedin])
 }
 
 enum JobLevel {
